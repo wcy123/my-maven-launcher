@@ -14,10 +14,11 @@ package com.github.wcy123.maven.launcher;
  * the License.
  */
 
-import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -27,11 +28,11 @@ import java.util.jar.Manifest;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.apache.maven.artifact.Artifact;
 import org.apache.maven.artifact.repository.ArtifactRepository;
 import org.apache.maven.artifact.repository.ArtifactRepositoryPolicy;
 import org.apache.maven.artifact.repository.MavenArtifactRepository;
 import org.apache.maven.artifact.repository.layout.ArtifactRepositoryLayout;
-import org.apache.maven.artifact.resolver.filter.ArtifactFilter;
 import org.apache.maven.execution.MavenSession;
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
@@ -40,11 +41,8 @@ import org.apache.maven.plugins.annotations.Component;
 import org.apache.maven.plugins.annotations.Mojo;
 import org.apache.maven.plugins.annotations.Parameter;
 import org.apache.maven.project.DefaultProjectBuildingRequest;
-import org.apache.maven.project.MavenProject;
 import org.apache.maven.project.ProjectBuilder;
-import org.apache.maven.project.ProjectBuildingException;
 import org.apache.maven.project.ProjectBuildingRequest;
-import org.apache.maven.project.ProjectBuildingResult;
 import org.apache.maven.repository.LocalArtifactRepository;
 import org.apache.maven.shared.artifact.resolve.ArtifactResolver;
 import org.apache.maven.shared.artifact.resolve.ArtifactResolverException;
@@ -53,7 +51,6 @@ import org.apache.maven.shared.dependencies.DefaultDependableCoordinate;
 import org.apache.maven.shared.dependencies.resolve.DependencyResolver;
 import org.apache.maven.shared.dependencies.resolve.DependencyResolverException;
 import org.apache.maven.shared.dependency.graph.DependencyGraphBuilder;
-import org.apache.maven.shared.dependency.graph.DependencyGraphBuilderException;
 import org.apache.maven.shared.dependency.graph.DependencyNode;
 import org.apache.maven.shared.utils.StringUtils;
 
@@ -234,57 +231,53 @@ public class RunnerMojo
                     dependencyResolver.resolveDependencies(buildingRequest, coordinate, null);
 
             // start from here
-            /*
-             * DefaultArtifactCoordinate artifactCoordinate = new DefaultArtifactCoordinate();
-             * artifactCoordinate.setGroupId(coordinate.getGroupId());
-             * artifactCoordinate.setArtifactId(coordinate.getArtifactId());
-             * artifactCoordinate.setVersion(coordinate.getVersion());
-             * artifactCoordinate.setExtension(coordinate.getVersion());
-             * artifactCoordinate.setClassifier(coordinate.getClassifier());
-             * //buildingRequest.setProject(null);
-             */
             if (!artifactResults.iterator().hasNext()) {
                 getLog().error("cannot find the first artifcat");
                 return;
             }
+            List<Artifact> listOfArtifacts = new ArrayList<>();
             for (ArtifactResult artifactResult : artifactResults) {
                 getLog().info("artifacts " + artifactResult.getArtifact());
-                artifactResolver.resolveArtifact(buildingRequest, artifactResult.getArtifact());
-            }
-            final ArtifactResult artifactResult = artifactResults.iterator().next();
-            // artifactResolver.resolveArtifact(buildingRequest, artifactCoordinate);
+                listOfArtifacts.add(
+                        artifactResolver
+                                .resolveArtifact(buildingRequest, artifactResult.getArtifact())
+                                .getArtifact());
 
-            buildingRequest.setProject(null);
-            final ProjectBuildingResult projectBuildingResult =
-                    projectBuilder.build(artifactResult.getArtifact(), buildingRequest);
-            final MavenProject project = projectBuildingResult.getProject();
-            buildingRequest.setProject(project);
-            ArtifactFilter artifactFilter = null;
-            rootNode = dependencyGraphBuilder.buildDependencyGraph(buildingRequest, artifactFilter);
-            final MavenClassLoader classLoader =
-                    MavenClassLoader.create(rootNode, artifactResolver, buildingRequest);
-            final File file = classLoader.getFile(rootNode);
-            final JarFile jarFile = new JarFile(file);
+            }
+            URL[] urls = new URL[listOfArtifacts.size()];
+            for (int i = 0; i < urls.length; ++i) {
+                urls[i] = listOfArtifacts.get(i).getFile().toURI().toURL();
+            }
+            final SharedUrlClassLoader classLoader = SharedUrlClassLoader.create(urls);
+
+            final JarFile jarFile = new JarFile(urls[0].getFile());
             final Manifest manifest = jarFile.getManifest();
-            final String value = manifest.getMainAttributes().getValue("Main-Class");
+            String value = manifest.getMainAttributes().getValue("Main-Class");
             // final String charSequence = "cannot find Main-Class: " +
             // manifest.getMainAttributes().entrySet().stream().map(e -> e.getKey() + ":" +
             // e.getValue()).collect(Collectors.joining("\n"));
             if (value == null) {
-                throw new MojoFailureException("cannot find Main-Class " + file);
+                throw new MojoFailureException("cannot find Main-Class " + classLoader.getURLs());
             }
-            final Class<?> aClass = classLoader.loadClass(value);
+            value = "com.wcy123.HelloWorldApplication";
+            System.out.println("value is value " + value);
+            final Class<?> aClass = Class.forName(value, true, classLoader);
             final Method main = aClass.getMethod("main", String[].class);
-            main.invoke(null, new Object[] {new String[] {"hello", "world"}});
-
+            Thread runnerThread = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        main.invoke(null, new Object[] {new String[] {"hello", "world"}});
+                    } catch (IllegalAccessException | InvocationTargetException e) {
+                        e.printStackTrace();
+                    }
+                }
+            });
+            runnerThread.setContextClassLoader(classLoader);
+            runnerThread.start();
+            runnerThread.join();
         } catch (DependencyResolverException e) {
             throw new MojoExecutionException("Couldn't download artifact: " + e.getMessage(), e);
-        } catch (ProjectBuildingException e) {
-            getLog().error("cannot build in-memory project ", e);
-            throw new MojoFailureException("cannot build in-memory project");
-        } catch (DependencyGraphBuilderException e) {
-            getLog().error("cannot resolve dependency", e);
-            throw new MojoFailureException("cannot resolve dependency");
         } catch (IOException e) {
             getLog().error("cannot create class loader", e);
             throw new MojoFailureException("cannot create class loader");
@@ -297,12 +290,18 @@ public class RunnerMojo
         } catch (NoSuchMethodException e) {
             getLog().error("cannot get main method", e);
             throw new MojoFailureException("cannot get main method");
-        } catch (IllegalAccessException | InvocationTargetException e) {
-            getLog().error("cannot invoke main method", e);
-            throw new MojoFailureException("cannot invoke main method");
+        } catch (InterruptedException e) {
+            getLog().error("interrupted", e);
         }
     }
 
+    private String readStream(InputStream input) throws IOException {
+        StringBuilder sb = new StringBuilder();
+        for (int c = input.read(); c != -1; c = input.read()) {
+            sb.append((char) c);
+        }
+        return sb.toString();
+    }
     ArtifactRepository parseRepository(String repo, ArtifactRepositoryPolicy policy)
             throws MojoFailureException {
         // if it's a simple url

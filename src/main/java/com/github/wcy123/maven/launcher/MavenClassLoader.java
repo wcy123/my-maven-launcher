@@ -2,9 +2,9 @@ package com.github.wcy123.maven.launcher;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.PrintStream;
 import java.net.URL;
 import java.net.URLClassLoader;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -17,29 +17,27 @@ import org.apache.maven.shared.dependency.graph.DependencyNode;
 public class MavenClassLoader extends URLClassLoader {
     private final static Map<String, MavenClassLoader> cache = new ConcurrentHashMap<>();
     private final static Map<String, File> cacheFile = new ConcurrentHashMap<>();
-    private final ClassLoader[] parents;
-    private final String name;
+    private final MavenClassLoader[] collections;
+    private final String key;
 
-    private MavenClassLoader(DependencyNode node, ArtifactResolver artifactResolver,
-            ProjectBuildingRequest buildRequest) throws IOException, ArtifactResolverException {
+    private MavenClassLoader(DependencyNode node,
+            ArtifactResolver artifactResolver,
+            ProjectBuildingRequest buildRequest,
+            MavenClassLoader[] collections) throws IOException, ArtifactResolverException {
         super(myGuessUrls(node, artifactResolver, buildRequest));
-        final List<DependencyNode> nodes = node.getChildren();
-        parents = new ClassLoader[nodes.size() + 1];
-        parents[0] = getParent();
-        for (int i = 1; i < nodes.size() + 1; ++i) {
-            final DependencyNode n = nodes.get(i - 1);
-            parents[i] = new MavenClassLoader(n, artifactResolver, buildRequest);
-        }
-        name = toKey(node);
+        this.collections = collections;
+        key = toKey(node);
     }
 
     public static MavenClassLoader create(DependencyNode node, ArtifactResolver artifactResolver,
-            ProjectBuildingRequest buildRequest) throws IOException, ArtifactResolverException {
+            ProjectBuildingRequest buildRequest, MavenClassLoader[] collections)
+            throws IOException, ArtifactResolverException {
         String key = toKey(node);
         if (cache.containsKey(key)) {
             return cache.get(key);
         }
-        final MavenClassLoader value = new MavenClassLoader(node, artifactResolver, buildRequest);
+        final MavenClassLoader value =
+                new MavenClassLoader(node, artifactResolver, buildRequest, collections);
         cache.put(key, value);
         return value;
     }
@@ -64,48 +62,53 @@ public class MavenClassLoader extends URLClassLoader {
         return new URL[] {file.toURI().toURL()};
     }
 
-    public File getFile(DependencyNode node) {
-        return cacheFile.get(toKey(node));
+    public void print(PrintStream out, int indentLevel) {
+        out.println(indent(indentLevel) + id());
+        for (MavenClassLoader mavenNode : collections) {
+            mavenNode.print(out, indentLevel + 1);
+        }
+    }
+
+    public String id() {
+        return getFileName() + "@" + this;
+    }
+
+    private String indent(int indent) {
+        final char[] chars = new char[indent * 4];
+        for (int i = 0; i < chars.length; ++i) {
+            chars[i] = ' ';
+        }
+        return new String(chars);
+    }
+
+    public File getFile() {
+        return cacheFile.get(key);
     }
 
     @Override
-    public Class<?> loadClass(String name, boolean resolved) throws ClassNotFoundException {
-        for (ClassLoader parent : parents) {
-            try {
-                final Class<?> aClass = parent.loadClass(name);
-                if (parent instanceof MavenClassLoader) {
-                    MavenClassLoader cl = (MavenClassLoader) parent;
-                    System.out.println("loaded class " + name + " by " + cacheFile.get(cl.name)
-                            + "@" + parent);
-                    System.out.println("classLoader is " + aClass.getClassLoader());
-                } else {
-                    MavenClassLoader cl = (MavenClassLoader) parent;
-                    System.out.println(
-                            "loaded class " + name + " by other class loader " + "@" + parent);
-                }
-                return aClass;
-            } catch (ClassNotFoundException ex) {
-                if (parent instanceof MavenClassLoader) {
-                    MavenClassLoader cl = (MavenClassLoader) parent;
-                    System.out.println("cannot find class " + name + " by " + cacheFile.get(cl.name)
-                            + "@" + cl);
-                } else {
-                    System.out.println(
-                            "cannot find class " + name + " by other class loader " + "@" + parent);
-                }
-                // do not matter.
-            }
+    public Class<?> findClass(String name) throws ClassNotFoundException {
+        for (MavenClassLoader cl : collections) {
+            return cl.superFindClass(name);
         }
+        throw new ClassNotFoundException(name);
+    }
+
+    private Class<?> superFindClass(String name) throws ClassNotFoundException {
         try {
-            final Class<?> aClass = super.loadClass(name, resolved);
-            System.out.println(
-                    "!loaded class " + name + " by " + cacheFile.get(this.name) + "@" + this);
+            final Class<?> aClass = super.findClass(name);
+            System.out.println("loaded class " + name + " by " + getFileName()
+                    + "@" + this);
             System.out.println("classLoader is " + aClass.getClassLoader());
             return aClass;
         } catch (ClassNotFoundException ex) {
-            System.out.println("!cannot find class " + name + " by " + cacheFile.get(this.name)
+            System.out.println("cannot find class " + name + " by " + getFileName()
                     + "@" + this);
+            // do not matter.
             throw ex;
         }
+    }
+
+    private File getFileName() {
+        return cacheFile.get(this.key);
     }
 }
